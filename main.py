@@ -106,14 +106,15 @@ def train_model(model_path: Path, mode: str,
     return model
 
 def eval_on_val(X_val: np.ndarray, y_val: np.ndarray, pad: bool, 
-                normalize: bool, model = None, 
+                normalize: bool, model = None, mode: str ='affine',
                 model_path: Path = None) -> dict:
     gt_indices = torch.arange(len(y_val))
     
     X, y = preprocess(X_val, y_val, pad, normalize)
-    model = Translator(pad=pad, mode='linear')
 
     if model_path:
+        model = Translator(pad=pad, mode=mode)
+
         state = torch.load(model_path)
         model.load_state_dict(state)
         
@@ -162,7 +163,7 @@ if __name__ == "__main__":
 
     model = train_model('models/exp1.pth', 'affine', train_loader, val_loader, False, epochs, lr)
 
-    results = eval_on_val(X_val.numpy(), y_val.numpy(), pad=False, normalize=False, model=model)
+    results = eval_on_val(X_val.numpy(), y_val.numpy(), pad=False, normalize=False, mode='affine', model='models/exp1.pth')
     print("Test Results:", results)
 
 
