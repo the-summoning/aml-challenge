@@ -9,19 +9,6 @@ from pathlib import Path
 from tqdm import tqdm
 
 
-def load_training_data(train_path: Path) -> tuple[np.array, np.array]:
-    train_data = np.load(train_path)
-    data = dict()
-    
-    data['image_embeddings'] = train_data['images/embeddings']   # clip-vit-large-patch14 -> 1536 
-    data['caption_embeddings'] = train_data['captions/embeddings']  # roberta-large-nli-stsb-mean-tokens -> 1024
-    data['caption_labels'] = train_data['captions/label']
-
-    train_data.close()
-
-    return data
-
-
 def pad_and_standardize(data: np.array, pad: bool, pad_val: int) -> torch.Tensor:
     data_torch = torch.from_numpy(data).float()
     if pad:
