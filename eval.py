@@ -1,6 +1,9 @@
+from pathlib import Path
 import numpy as np
 import torch
 import pandas as pd
+
+from model import Translator
 '''Code from https://github.com/Mamiglia/challenge'''
 
 def mrr(pred_indices: np.ndarray, gt_indices: np.ndarray) -> float:
@@ -128,20 +131,23 @@ def evaluate_retrieval(translated_embd, image_embd, gt_indices, max_indices = 99
     
     return results
 
-def generate_submission(sample_ids, translated_embeddings, output_file="submission.csv"):
-    """
-    Generate a submission.csv file from translated embeddings.
-    """
+def generate_submission(model: Translator, test_path: Path, output_file="submission.csv", device=None):
+    test_data = np.load(test_path)
+    sample_ids = test_data['captions/ids']
+    test_embds = test_data['captions/embeddings']
+    test_embds = torch.from_numpy(test_embds).float()
+
+    with torch.no_grad():
+        pred_embds = model(test_embds.to(device)).cpu()
+
     print("Generating submission file...")
 
-    if isinstance(translated_embeddings, torch.Tensor):
-        translated_embeddings = translated_embeddings.cpu().numpy()
+    if isinstance(pred_embds, torch.Tensor):
+        pred_embds = pred_embds.cpu().numpy()
 
-    # Create a DataFrame with sample_id and embeddings
-
-    df_submission = pd.DataFrame({'id': sample_ids, 'embedding': translated_embeddings.tolist()})
+    df_submission = pd.DataFrame({'id': sample_ids, 'embedding': pred_embds.tolist()})
 
     df_submission.to_csv(output_file, index=False, float_format='%.17g')
     print(f"✓ Saved submission to {output_file}")
-    
+
     return df_submission
