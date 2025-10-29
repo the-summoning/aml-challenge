@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from model import Translator
 import torch.nn.functional as F
-from eval import evaluate_retrieval, generate_submission
+from eval import generate_submission, eval_on_val
 from torch.utils.data import TensorDataset, DataLoader
 from pathlib import Path
 from tqdm import tqdm
@@ -28,12 +28,12 @@ def preprocess(X_abs: np.array, Y_abs: np.array, pad: bool, standardize: bool, n
     assert X_abs.ndim == 2 and Y_abs.ndim == 2, "Both data must be 2D"
     X_abs, Y_abs = torch.from_numpy(X_abs).float(), torch.from_numpy(Y_abs).float()
 
-    if pad:
-        x_pad = max(Y_abs.shape[1] - X_abs.shape[1], 0)
-        y_pad = max(X_abs.shape[1] - Y_abs.shape[1], 0)
+    # if pad:
+    #     x_pad = max(Y_abs.shape[1] - X_abs.shape[1], 0)
+    #     y_pad = max(X_abs.shape[1] - Y_abs.shape[1], 0)
 
-        X_abs = pad(X_abs, x_pad)
-        Y_abs = pad(Y_abs, y_pad)
+    #     X_abs = pad(X_abs, x_pad)
+    #     Y_abs = pad(Y_abs, y_pad)
 
     if standardize:
         X_abs = standardize(X_abs)
@@ -112,18 +112,6 @@ def train_model(model: Translator, model_path: Path, mode: str,
 
     return model
 
-def eval_on_val(X_val: np.ndarray, y_val: np.ndarray, model: Translator, device) -> dict:
-    gt_indices = torch.arange(len(y_val))
-    
-    model.eval()
-
-    with torch.inference_mode():
-        translated = model(X_val.to(device)).to('cpu')
-
-    results = evaluate_retrieval(translated, y_val, gt_indices)
-    
-    return results
-
 def extract_anchors(data: torch.Tensor, method: Literal['pca', 'k-means', 'random'], anchors_number: int):
     assert isinstance(data, torch.Tensor) and data.ndim == 2 and data.shape[0] > 0, "Expected a valid tensor"
     assert method in ['pca', 'k-means', 'random'], f'Method {method} not supported'
@@ -147,25 +135,11 @@ def extract_anchors(data: torch.Tensor, method: Literal['pca', 'k-means', 'rando
 
     return anchors
 
-def main():
-    with open("./config.yaml", "r") as f:
-        config = yaml.safe_load(f)
-    
-    batch_size = config['batch_size']
-    epochs = config['num_epochs']
-    lr = config['learning_rate']
-    anchors_number = config['anchors_num']
-    data_path = config['train_path']
-    use_relative = config['use_relative']
-    mode = config['model_mode']
-    model_save_path = config['model_save_path']
-    anchors_method = config['anchors_method']   
+def load_data(data_path: Path, config: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
-    pad = config['pad']
+    use_pad = config['pad']
     normalize = config['normalize'] 
     standardize = config['standardize']
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
 
     data = np.load(data_path)
     caption_embeddings = data['captions/embeddings']
@@ -173,51 +147,79 @@ def main():
     caption_labels = data['captions/label']
 
     X_abs, y_abs = preprocess(caption_embeddings, image_embeddings[np.argmax(caption_labels, axis=1)], 
-                              pad=pad, standardize=standardize, normalize=normalize)
+                              pad=use_pad, standardize=standardize, normalize=normalize)
     
-    X_anchors = extract_anchors(X_abs, anchors_method, anchors_number).to(device)
-
     print('Texts shape', X_abs.shape)
     print('Images shape', X_abs.shape)
-    print('Anchors shape', X_anchors.shape if X_anchors is not None else '')
 
     n_train = int(0.9 * X_abs.shape[0])
     train_split = torch.zeros(X_abs.shape[0], dtype=torch.bool)
     train_split[:n_train] = 1
-
+    
     X_train, X_val = X_abs[train_split], X_abs[~train_split]
     y_train, y_val = y_abs[train_split], y_abs[~train_split]
+    
+    return X_train, y_train, X_val, y_val
 
+    
+def test(model: Translator, X_val: torch.Tensor, y_val: torch.tensor, device):
+    results = eval_on_val(X_val, y_val, model=model, device=device)
+    print("Test Results:", results)
+
+
+def train(config: dict, model: Translator, X_train: torch.Tensor, y_train: torch.Tensor, X_val: torch.Tensor, y_val: torch.Tensor):
+    
+    batch_size = config['batch_size']
+    epochs = config['num_epochs']
+    lr = config['learning_rate']
+    
+    model_save_path = config['model_save_path']
+    
     train_dataset = TensorDataset(X_train, y_train)
     val_dataset = TensorDataset(X_val, y_val)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
-    model_args = {
-        'input_dim': X_train.shape[1],
-        'output_dim': y_train.shape[1],
-        'mode': mode,
-        'use_relative': use_relative,
-        'anchors': X_anchors
-    }
-
-    model = Translator(**model_args).to(device)
-
     train_model(model, model_save_path, 'affine', train_loader, val_loader, epochs, lr)
 
     print('Finished training. Now testing using best model...')
 
+
+if __name__ == "__main__":
+    with open("./config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input_dim = config['input_dim']
+    output_dim = config['output_dim']
+    anchors_number = config['anchors_num']
+    use_relative = config['use_relative']
+    mode = config['model_mode']
+    
+    data_path = config['data_path']
+    X_train, Y_train, X_val, y_val = load_data(data_path, config)
+    extract_anchors_method = config['anchors_method']
+    extract_anchors_number = config['anchors_num']
+    X_anchors = extract_anchors(X_train, extract_anchors_method, extract_anchors_number).to(device) if use_relative else None
+    model_args = {
+        'input_dim': input_dim,
+        'output_dim': output_dim,
+        'mode': mode,
+        'use_relative': use_relative,
+        'anchors': X_anchors
+    }
+    model = Translator(**model_args).to(device)
+
+    train(config=config, model=model, X_train=X_train, y_train=Y_train, X_val=X_val, y_val=y_val)
+
+    test_path = config['test_path']
+    model_save_path = config['model_save_path']
     state = torch.load(model_save_path)
     model.load_state_dict(state)
 
-    results = eval_on_val(X_val, y_val, model=model, device=device)
-    print("Test Results:", results)
-
-    test_path = config['test_path']
+    test(model, X_val, y_val, test_path, device)
     generate_submission(model, Path(test_path), device=device)
 
-if __name__ == "__main__":
-    main()
 
 

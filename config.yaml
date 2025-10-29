@@ -13,3 +13,5 @@ anchors_method: 'pca'
 use_relative: True
 model_mode: 'affine'
 model_save_path: './models/exp1.pth'
+input_dim: 1024
+output_dim: 1536
