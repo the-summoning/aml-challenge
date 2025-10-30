@@ -1,51 +1,58 @@
 
+from typing import Literal
 import numpy as np
 import torch
 from model import Translator
 import torch.nn.functional as F
-from eval import evaluate_retrieval
+from eval import generate_submission, eval_on_val
 from torch.utils.data import TensorDataset, DataLoader
 from pathlib import Path
 from tqdm import tqdm
+from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
+import yaml
 
 
-def pad_and_standardize(data: np.array, pad: bool, pad_val: int) -> torch.Tensor:
-    data_torch = torch.from_numpy(data).float()
-    if pad:
-        data_torch = F.pad(data_torch, (0, pad_val), mode="constant", value=0)
+def pad(data: torch.Tensor, pad_val: int) -> torch.Tensor:
+    return F.pad(data, (0, pad_val), mode="constant", value=0)
 
-    mean = data_torch.mean(dim=0, keepdim=True)
-    std = data_torch.std(dim=0, keepdim=True) + 1e-8
-    data_standardized = (data_torch - mean) / std
+def standardize(data: torch.Tensor) -> torch.Tensor:
+
+    mean = data.mean(dim=0, keepdim=True)
+    std = data.std(dim=0, keepdim=True) + 1e-8
+    data_standardized = (data - mean) / std
 
     return data_standardized
 
-
-def preprocess(X_abs: np.array, Y_abs: np.array, pad: bool, normalize: bool=True) -> tuple[torch.Tensor, torch.Tensor]:
+def preprocess(X_abs: np.array, Y_abs: np.array, pad: bool, standardize: bool, normalize: bool) -> tuple[torch.Tensor, torch.Tensor]:
     assert X_abs.ndim == 2 and Y_abs.ndim == 2, "Both data must be 2D"
+    X_abs, Y_abs = torch.from_numpy(X_abs).float(), torch.from_numpy(Y_abs).float()
 
-    x_pad = max(Y_abs.shape[1] - X_abs.shape[1], 0)
-    y_pad = max(X_abs.shape[1] - Y_abs.shape[1], 0)
+    # if pad:
+    #     x_pad = max(Y_abs.shape[1] - X_abs.shape[1], 0)
+    #     y_pad = max(X_abs.shape[1] - Y_abs.shape[1], 0)
 
-    X_pre = pad_and_standardize(X_abs, pad, x_pad)
-    Y_pre = pad_and_standardize(Y_abs, pad, y_pad)
+    #     X_abs = pad(X_abs, x_pad)
+    #     Y_abs = pad(Y_abs, y_pad)
+
+    if standardize:
+        X_abs = standardize(X_abs)
+        Y_abs = standardize(Y_abs)
 
     if normalize:
-        X_pre = F.normalize(X_pre, dim=1)
-        Y_pre = F.normalize(Y_pre, dim=1)
+        X_abs = F.normalize(X_abs, dim=1)
+        Y_abs = F.normalize(Y_abs, dim=1)
 
-    return X_pre, Y_pre
+    return X_abs, Y_abs
 
 
-def train_model(model_path: Path, mode: str, 
+def train_model(model: Translator, model_path: Path, mode: str, 
                 train_loader: DataLoader, val_loader: DataLoader,
-                pad: bool, epochs: int, lr: float) -> Translator:
+                epochs: int, lr: float) -> Translator:
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Using device: {device}")
-
-    model = Translator(pad=pad,mode=mode).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
@@ -62,8 +69,8 @@ def train_model(model_path: Path, mode: str,
 
             outputs = model(X_batch)
 
-            loss = 1 - F.cosine_similarity(outputs, y_batch, dim=1).mean()
-            #loss = F.mse_loss(outputs, y_batch)
+            #loss = 1 - F.cosine_similarity(outputs, y_batch, dim=1).mean()
+            loss = F.mse_loss(outputs, y_batch)
 
             loss.backward()
 
@@ -85,8 +92,8 @@ def train_model(model_path: Path, mode: str,
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
                 outputs = model(X_batch)
 
-                loss = 1 - F.cosine_similarity(outputs, y_batch, dim=1).mean()
-                #loss = F.mse_loss(outputs, y_batch)
+                #loss = 1 - F.cosine_similarity(outputs, y_batch, dim=1).mean()
+                loss = F.mse_loss(outputs, y_batch)
 
                 val_loss += loss.item()
 
@@ -105,65 +112,114 @@ def train_model(model_path: Path, mode: str,
 
     return model
 
-def eval_on_val(X_val: np.ndarray, y_val: np.ndarray, pad: bool, 
-                normalize: bool, model = None, mode: str ='affine',
-                model_path: Path = None) -> dict:
-    gt_indices = torch.arange(len(y_val))
-    
-    X, y = preprocess(X_val, y_val, pad, normalize)
+def extract_anchors(data: torch.Tensor, method: Literal['pca', 'k-means', 'random'], anchors_number: int):
+    assert isinstance(data, torch.Tensor) and data.ndim == 2 and data.shape[0] > 0, "Expected a valid tensor"
+    assert method in ['pca', 'k-means', 'random'], f'Method {method} not supported'
+    assert isinstance(anchors_number, int) and anchors_number > 0, "Expected a natural positive number"
 
-    if model_path:
-        model = Translator(pad=pad, mode=mode)
+    data_np = data.cpu().numpy()
 
-        state = torch.load(model_path)
-        model.load_state_dict(state)
+    if method == 'pca':
+        # PCA already returns normalized anchors
+        pca = PCA(n_components=anchors_number)
+        pca.fit(data_np)
         
-    model.eval()
+        anchors = torch.from_numpy(pca.components_).float()
+    elif method == 'k-means':
+        kmeans = KMeans(n_clusters=anchors_number, init='k-means++', n_init=10, random_state=42)
+        kmeans.fit(data_np)
+        
+        anchors = torch.from_numpy(kmeans.cluster_centers_).float()
+    else:
+        anchors = data[torch.randperm(data.size(0))[:anchors_number]]
 
-    with torch.inference_mode():
-        translated = model(X)
+    return anchors
 
-    results = evaluate_retrieval(translated, y, gt_indices)
-    
-    return results
+def load_data(data_path: Path, config: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
-if __name__ == "__main__":
-    batch_size = 512
-    epochs = 100
-    lr = 0.0005
+    use_pad = config['pad']
+    normalize = config['normalize'] 
+    standardize = config['standardize']
 
-    data = np.load(Path('data/train/train.npz'))
+    data = np.load(data_path)
     caption_embeddings = data['captions/embeddings']
     image_embeddings = data['images/embeddings']
     caption_labels = data['captions/label']
 
-    X_abs = caption_embeddings # captions space
-    y_abs = image_embeddings[np.argmax(caption_labels, axis=1)] # images space
-
-    X, y = preprocess(X_abs, y_abs, pad=False, normalize=False)
+    X_abs, y_abs = preprocess(caption_embeddings, image_embeddings[np.argmax(caption_labels, axis=1)], 
+                              pad=use_pad, standardize=standardize, normalize=normalize)
     
+    print('Texts shape', X_abs.shape)
+    print('Images shape', X_abs.shape)
 
-    n_train = int(0.9 * len(X))
-    train_split = torch.zeros(len(X), dtype=torch.bool)
+    n_train = int(0.9 * X_abs.shape[0])
+    train_split = torch.zeros(X_abs.shape[0], dtype=torch.bool)
     train_split[:n_train] = 1
+    
+    X_train, X_val = X_abs[train_split], X_abs[~train_split]
+    y_train, y_val = y_abs[train_split], y_abs[~train_split]
+    
+    return X_train, y_train, X_val, y_val
 
-    X_train, X_val = X[train_split], X[~train_split]
-    y_train, y_val = y[train_split], y[~train_split]
+    
+def test(model: Translator, X_val: torch.Tensor, y_val: torch.tensor, device):
+    results = eval_on_val(X_val, y_val, model=model, device=device)
+    print("Test Results:", results)
 
-    print(X_train.shape, X_val.shape)
-    print(y_train.shape, y_val.shape)
 
-
+def train(config: dict, model: Translator, X_train: torch.Tensor, y_train: torch.Tensor, X_val: torch.Tensor, y_val: torch.Tensor):
+    
+    batch_size = config['batch_size']
+    epochs = config['num_epochs']
+    lr = config['learning_rate']
+    
+    model_save_path = config['model_save_path']
+    
     train_dataset = TensorDataset(X_train, y_train)
     val_dataset = TensorDataset(X_val, y_val)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size)
 
+    train_model(model, model_save_path, 'affine', train_loader, val_loader, epochs, lr)
 
-    model = train_model('models/exp1.pth', 'affine', train_loader, val_loader, False, epochs, lr)
+    print('Finished training. Now testing using best model...')
 
-    results = eval_on_val(X_val.numpy(), y_val.numpy(), pad=False, normalize=False, mode='affine', model='models/exp1.pth')
-    print("Test Results:", results)
+
+if __name__ == "__main__":
+    with open("./config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input_dim = config['input_dim']
+    output_dim = config['output_dim']
+    anchors_number = config['anchors_num']
+    use_relative = config['use_relative']
+    mode = config['model_mode']
+    
+    data_path = config['data_path']
+    X_train, Y_train, X_val, y_val = load_data(data_path, config)
+    extract_anchors_method = config['anchors_method']
+    extract_anchors_number = config['anchors_num']
+    X_anchors = extract_anchors(X_train, extract_anchors_method, extract_anchors_number).to(device) if use_relative else None
+    model_args = {
+        'input_dim': input_dim,
+        'output_dim': output_dim,
+        'mode': mode,
+        'use_relative': use_relative,
+        'anchors': X_anchors
+    }
+    model = Translator(**model_args).to(device)
+
+    train(config=config, model=model, X_train=X_train, y_train=Y_train, X_val=X_val, y_val=y_val)
+
+    test_path = config['test_path']
+    model_save_path = config['model_save_path']
+    state = torch.load(model_save_path)
+    model.load_state_dict(state)
+
+    test(model, X_val, y_val, test_path, device)
+    generate_submission(model, Path(test_path), device=device)
+
 
 
