@@ -131,13 +131,13 @@ def evaluate_retrieval(translated_embd, image_embd, gt_indices, max_indices = 99
     
     return results
 
-def eval_on_val(X_val: np.ndarray, y_val: np.ndarray, model: Translator, device) -> dict:
+def eval_on_val(x_val: torch.Tensor, y_val: torch.Tensor, model: Translator, device) -> dict:
     gt_indices = torch.arange(len(y_val))
     
     model.eval()
 
     with torch.inference_mode():
-        translated = model(X_val.to(device)).to('cpu')
+        translated = model(x_val.to(device)).to('cpu')
 
     results = evaluate_retrieval(translated, y_val, gt_indices)
     

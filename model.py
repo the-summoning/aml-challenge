@@ -30,7 +30,7 @@ import torch
 #         U, _, Vh = torch.linalg.svd(W, full_matrices=False)
 #         self.linear.weight.data.copy_(U @ Vh)
 
-class Translator(nn.Module):
+class TranslatorAnchors(nn.Module):
     def __init__(self, input_dim=1024, output_dim=1536, mode='affine', use_relative=False, anchors: Optional[torch.Tensor] = None):
         super().__init__()
         assert mode in ['linear', 'affine', 'isometry'], f'Mode "{mode}" not supported'
@@ -58,3 +58,32 @@ class Translator(nn.Module):
             x = self.compute_relative(x)
         
         return self.linear(x)
+
+class Translator(nn.Module):
+    def __init__(self, input_dim, output_dim, hidden_layers, dropout_rate):
+        super().__init__()
+        layers = []
+        last = input_dim
+        for hidden in hidden_layers:
+            layers += [nn.Linear(last, hidden), nn.GELU(), nn.LayerNorm(hidden), nn.Dropout(dropout_rate)]
+            last = hidden
+        layers.append(nn.Linear(last, output_dim))
+        self.net = nn.Sequential(*layers)
+        
+        self.apply(self.init_weights)
+        
+    def init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.constant_(module.bias, 0.0)
+        elif isinstance(module, nn.LayerNorm):
+            nn.init.ones_(module.weight)
+            nn.init.zeros_(module.bias)
+
+    def forward(self, x):
+        x = F.normalize(x, dim=-1)
+        out = self.net(x)
+        
+        dir_vec = F.normalize(out, dim=-1)
+        return dir_vec
