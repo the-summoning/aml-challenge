@@ -6,6 +6,7 @@ from model import Translator
 import torch.nn.functional as F
 from eval import generate_submission, eval_on_val
 from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import random_split
 from pathlib import Path
 from tqdm import tqdm
 from sklearn.decomposition import PCA
@@ -47,16 +48,19 @@ def preprocess(X_abs: np.array, Y_abs: np.array, pad: bool, standardize: bool, n
 
 
 def train_model(model: Translator, model_path: Path, mode: str, 
-                train_loader: DataLoader, val_loader: DataLoader,
-                epochs: int, lr: float) -> Translator:
+                train_dataset: TensorDataset, val_dataset: TensorDataset, batch_size: int,
+                epochs: int, lr: float, patience: int) -> Translator:
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     print(f"Using device: {device}")
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
 
     best_val_loss = float('inf')
+    no_improvements = 0
+
 
     for epoch in range(epochs):
         model.train()
@@ -103,12 +107,17 @@ def train_model(model: Translator, model_path: Path, mode: str,
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            no_improvements = 0
 
             Path(model_path).parent.mkdir(parents=True, exist_ok=True)
 
             torch.save(model.state_dict(), model_path)
 
             print(f"✓ Saved best model (val_loss={val_loss:.6f})")
+        elif no_improvements >= patience:
+            return model
+        else:
+            no_improvements += 1
 
     return model
 
@@ -135,55 +144,29 @@ def extract_anchors(data: torch.Tensor, method: Literal['pca', 'k-means', 'rando
 
     return anchors
 
-def load_data(data_path: Path, config: dict) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-
-    use_pad = config['pad']
-    normalize = config['normalize'] 
-    standardize = config['standardize']
+def load_data(data_path: Path) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
 
     data = np.load(data_path)
     caption_embeddings = data['captions/embeddings']
     image_embeddings = data['images/embeddings']
     caption_labels = data['captions/label']
 
-    X_abs, y_abs = preprocess(caption_embeddings, image_embeddings[np.argmax(caption_labels, axis=1)], 
-                              pad=use_pad, standardize=standardize, normalize=normalize)
+    X_abs, y_abs = torch.tensor(caption_embeddings), torch.tensor(image_embeddings[np.argmax(caption_labels, axis=1)])
     
     print('Texts shape', X_abs.shape)
     print('Images shape', X_abs.shape)
-
-    n_train = int(0.9 * X_abs.shape[0])
-    train_split = torch.zeros(X_abs.shape[0], dtype=torch.bool)
-    train_split[:n_train] = 1
     
-    X_train, X_val = X_abs[train_split], X_abs[~train_split]
-    y_train, y_val = y_abs[train_split], y_abs[~train_split]
+    dataset = TensorDataset(X_abs, y_abs)
+    train_dataset, val_dataset = random_split(dataset, [0.9, 0.1], generator=torch.Generator().manual_seed(42))
     
-    return X_train, y_train, X_val, y_val
+    return train_dataset, val_dataset
 
     
-def test(model: Translator, X_val: torch.Tensor, y_val: torch.tensor, device):
-    results = eval_on_val(X_val, y_val, model=model, device=device)
-    print("Test Results:", results)
-
-
-def train(config: dict, model: Translator, X_train: torch.Tensor, y_train: torch.Tensor, X_val: torch.Tensor, y_val: torch.Tensor):
-    
-    batch_size = config['batch_size']
-    epochs = config['num_epochs']
-    lr = config['learning_rate']
-    
-    model_save_path = config['model_save_path']
-    
-    train_dataset = TensorDataset(X_train, y_train)
-    val_dataset = TensorDataset(X_val, y_val)
-
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-
-    train_model(model, model_save_path, 'affine', train_loader, val_loader, epochs, lr)
-
-    print('Finished training. Now testing using best model...')
+def test(val_dataset: TensorDataset, model: Translator, device):
+    val_loader = DataLoader(val_dataset, batch_size=len(val_dataset))
+    for x_val, y_val in val_loader:
+        results = eval_on_val(x_val, y_val, model=model, device=device)
+    return results
 
 
 if __name__ == "__main__":
@@ -198,28 +181,35 @@ if __name__ == "__main__":
     mode = config['model_mode']
     
     data_path = config['data_path']
-    X_train, Y_train, X_val, y_val = load_data(data_path, config)
-    extract_anchors_method = config['anchors_method']
-    extract_anchors_number = config['anchors_num']
-    X_anchors = extract_anchors(X_train, extract_anchors_method, extract_anchors_number).to(device) if use_relative else None
+    hidden_layers = config['hidden_layers']
+    model_save_path = config['model_save_path']
+    batch_size = config['batch_size']
+    epochs = config['num_epochs']
+    lr = config['learning_rate']
+    temp = config['temperature']
+    patience = config['patience']
+    test_path = config['test_data_path']
+
+    train_dataset, val_dataset = load_data(data_path, dict())
+    #X_anchors = extract_anchors(X_train, extract_anchors_method, extract_anchors_number).to(device) if use_relative else None
+
     model_args = {
         'input_dim': input_dim,
         'output_dim': output_dim,
-        'mode': mode,
-        'use_relative': use_relative,
-        'anchors': X_anchors
+        'hidden_layers': hidden_layers,
     }
     model = Translator(**model_args).to(device)
 
-    train(config=config, model=model, X_train=X_train, y_train=Y_train, X_val=X_val, y_val=y_val)
+    train_model(model, model_save_path, train_dataset, val_dataset, batch_size, epochs, lr, temp, patience)
 
-    test_path = config['test_path']
-    model_save_path = config['model_save_path']
+    print('Finished training. Now testing using best model...')
+
     state = torch.load(model_save_path)
     model.load_state_dict(state)
+    results = test(val_dataset, model, device)
+    print("Test Results:", results)
 
-    test(model, X_val, y_val, test_path, device)
+
     generate_submission(model, Path(test_path), device=device)
-
 
 
