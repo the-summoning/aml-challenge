@@ -99,7 +99,6 @@ if __name__ == "__main__":
     data_path = config['train_path']
     study = run_optuna_search(data_path=data_path,
                           n_trials=100, epochs=10, n_jobs=1)
-    optuna.study.study.Storage  
     study.trials_dataframe().to_csv("optuna_trials.csv", index=False)
 
     best_trial_number = study.best_trial.number
