@@ -1,10 +1,12 @@
-from pathlib import Path
 import numpy as np
 import torch
+from torch.utils.data import TensorDataset, DataLoader
+from torch import nn
+from pathlib import Path
+import numpy as np
 import pandas as pd
 
-from model import Translator
-'''Code from https://github.com/Mamiglia/challenge'''
+'''Some function taken from https://github.com/Mamiglia/challenge'''
 
 def mrr(pred_indices: np.ndarray, gt_indices: np.ndarray) -> float:
     """
@@ -73,27 +75,27 @@ def evaluate_retrieval(translated_embd, image_embd, gt_indices, max_indices = 99
         max_indices: number of top predictions to consider
     Returns:
         results: dict of evaluation metrics
-    
+
     """
     # Compute similarity matrix
     if isinstance(translated_embd, np.ndarray):
         translated_embd = torch.from_numpy(translated_embd).float()
     if isinstance(image_embd, np.ndarray):
         image_embd = torch.from_numpy(image_embd).float()
-    
+
     n_queries = translated_embd.shape[0]
     device = translated_embd.device
-    
+
     # Prepare containers for the fragments to be reassembled
     all_sorted_indices = []
     l2_distances = []
-    
+
     # Process in batches - the narrow gate approach
     for start_idx in range(0, n_queries, batch_size):
         batch_slice = slice(start_idx, min(start_idx + batch_size, n_queries))
         batch_translated = translated_embd[batch_slice]
         batch_img_embd = image_embd[batch_slice]
-        
+
         # Compute similarity only for this batch
         batch_similarity = batch_translated @ batch_img_embd.T
 
@@ -106,10 +108,10 @@ def evaluate_retrieval(translated_embd, image_embd, gt_indices, max_indices = 99
         batch_gt_embeddings = image_embd[batch_gt]
         batch_l2 = (batch_translated - batch_gt_embeddings).norm(dim=1)
         l2_distances.append(batch_l2)
-    
+
     # Reassemble the fragments
     sorted_indices = np.concatenate(all_sorted_indices, axis=0)
-    
+
     # Apply the sacred metrics to the whole
     metrics = {
         'mrr': mrr,
@@ -120,30 +122,19 @@ def evaluate_retrieval(translated_embd, image_embd, gt_indices, max_indices = 99
         'recall_at_10': lambda preds, gt: recall_at_k(preds, gt, 10),
         'recall_at_50': lambda preds, gt: recall_at_k(preds, gt, 50),
     }
-    
+
     results = {
         name: func(sorted_indices, gt_indices)
         for name, func in metrics.items()
     }
-    
+
     l2_dist = torch.cat(l2_distances, dim=0).mean().item()
     results['l2_dist'] = l2_dist
-    
+
     return results
 
-def eval_on_val(x_val: torch.Tensor, y_val: torch.Tensor, model: Translator, device) -> dict:
-    gt_indices = torch.arange(len(y_val))
-    
-    model.eval()
 
-    with torch.inference_mode():
-        translated = model(x_val.to(device)).to('cpu')
-
-    results = evaluate_retrieval(translated, y_val, gt_indices)
-    
-    return results
-
-def generate_submission(model: Translator, test_path: Path, output_file="submission.csv", device=None):
+def generate_submission(model: nn.Module, test_path: Path, output_file="submission-dirmodel.csv", device=None):
     test_data = np.load(test_path)
     sample_ids = test_data['captions/ids']
     test_embds = test_data['captions/embeddings']
@@ -163,3 +154,23 @@ def generate_submission(model: Translator, test_path: Path, output_file="submiss
     print(f"✓ Saved submission to {output_file}")
 
     return df_submission
+
+
+def eval_on_val(x_val: np.ndarray, y_val: np.ndarray, model: nn.Module, device) -> dict:
+    gt_indices = torch.arange(len(y_val))
+
+    model.eval()
+
+    with torch.inference_mode():
+        translated = model(x_val.to(device)).to('cpu')
+
+    results = evaluate_retrieval(translated, y_val, gt_indices)
+
+    return results
+
+
+def test(val_dataset: TensorDataset, model: nn.Module, device):
+    val_loader = DataLoader(val_dataset, batch_size=len(val_dataset))
+    for x_val, y_val in val_loader:
+        results = eval_on_val(x_val, y_val, model=model, device=device)
+    return results
