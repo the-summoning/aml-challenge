@@ -1,0 +1,198 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% AML 2025/26 - Cross-Modal Retrieval Challenge Report
+% This is a 1-page (max) report template.
+%
+% COMPILE INSTRUCTIONS:
+% pdflatex report.tex
+% biber report
+% pdflatex report.tex
+% pdflatex report.tex (run twice for final layout)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[twocolumn,10pt]{article}
+
+% --- PACKAGES ---
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsfonts} % For math
+\usepackage{graphicx}                   % For images
+\usepackage[margin=0.75in]{geometry}    % For tight 1-page margins
+\usepackage{booktabs}                   % For nice tables
+\usepackage{hyperref}                   % For clickable links
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=blue,
+    citecolor=blue,
+}
+\usepackage{balance}                    % To balance columns on the last page
+\usepackage{lipsum}                     % For placeholder text (REMOVE IN FINAL)
+
+% --- BIBLIOGRAPHY (using biblatex) ---
+\usepackage[
+    backend=biber,
+    style=numeric, % Use numeric citations [1]
+    sorting=none   % Sort references in order of appearance
+]{biblatex}
+\addbibresource{references.bib}         % Your .bib file
+
+% --- STYLING ---
+\setlength{\columnsep}{0.1in}          % Space between columns
+\setlength{\parskip}{0.1em}             % Space between paragraphs
+\setlength{\parindent}{0pt}             % No paragraph indentation
+
+% --- TITLE & AUTHOR BLOCK ---
+\title{Stitch \\ \large AML Challenge Report 2025/26}
+
+\author{
+    Davide Perniconi \\
+    \small Matricola: 1889270 \\
+    \and
+    Daniele Marretta \\
+    \small Matricola: 1985747 \\
+    \and
+    Olga Corovencova \\
+    \small Matricola: 2249558 \\
+    \and
+    Leonardo Lavezzari \\
+    \small Matricola: 1984079 \\
+}
+\date{} % omit
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\begin{document}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\maketitle
+\thispagestyle{empty} % No page number on the first page
+
+%=====================================================
+
+\section{Proposed Method}
+We used a \textit{contrastive approach} in order to learn a mapping function $T: R^{1024} \implies R^{1536}$ able to correctly align the captions of the text embeddings (\texttt{roberta-large-nli-stsb-mean-tokens} \cite{reimers-2019-sentence-bert}) with the space of image embeddings (\texttt{DINOv2-giant} \cite{oquab2023dinov2}).
+
+\begin{itemize}
+    \item \textbf{Architecture:} Our model is a \textbf{MLP} network with the following configuration:
+    \begin{enumerate}
+        \item \textit{Input dimension:} $1024$
+        \item \textit{Hidden layers:} $[1256,2048]$
+        \item \textit{output dimension:} $1536$
+        \item \textit{Activation:} Gelu
+        \item \textit{Dropout:} $0.5$
+        \item \textit{Learnable Temperature parameter}
+        \item \textit{Inizialization:} Xavier uniform
+        \item \textit{Normalization:} The final embedding is L2-normalized
+    \end{enumerate}
+%      \item \textbf{Loss Function:} We augmented the InfoNCE loss with a memory bank, drawing inspiration from the MoCo framework \cite{he2020momentumcontrastunsupervisedvisual}.
+%  Unlike standard MoCo, a query encoder is trained, and a momentum-updated key encoder provides key representations. In our setup, this dynamic is adapted for multimodal retrieval:
+
+% \begin{enumerate}
+%     \item \textbf{Query Encoder:} This role is fulfilled by our MLP, the only component updated by backpropagation.
+
+%     \item \textbf{Key Encoder:} This role is fulfilled by the pre-trained \textbf{DINO} image model. We treat its embeddings as the key targets.
+
+%     \item \textbf{Memory Bank:} A FIFO queue that stores key vectors from prior mini-batches. This bank provides a large, diverse set of negative samples without requiring a prohibitively large batch size, which is the core benefit of the MoCo approach.
+% \end{enumerate}
+
+\item \textbf{Loss Function:} We augmented the InfoNCE loss with a large pool of negative samples, conceptually inspired by the \textbf{Momentum Contrast (MoCo)} framework \cite{he2020momentumcontrastunsupervisedvisual}. Our architecture adapts the MoCo Query/Key mechanism for multimodal alignment:
+
+\begin{enumerate}
+    \item \textbf{Query Encoder:} This role is fulfilled by our \textbf{MLP projector}, which operates on the fixed text encoder embeddings. The MLP is the only component updated via backpropagation, learning the translation into the target space.
+
+    \item \textbf{Key Encoder (Target):} This role is conceptually fulfilled by the image encoder. Instead of maintaining a momentum-updated key encoder, its embeddings are treated as fixed, non-updating anchors (the key targets).
+
+    \item \textbf{Memory Bank:} A FIFO queue that stores key vectors from prior mini-batches. This bank provides a large, diverse set of negative samples without requiring a prohibitively large batch size, which is the core benefit of the MoCo approach.
+\end{enumerate}
+    
+    \item \textbf{Training Details:} We trained the model with AdamW optimizer (learning rate 0.01, weight decay $1 \times 10 \textsuperscript{-5}$) using batches of 256. A ReduceLROnPlateau scheduler, adjusted the learning rate based on validation loss. The size of the queue is 10,000 and we used early stopping when validation loss stagnated. Validation performance was tracked using MRR and Validation Loss. All hyperparameters, including the queue size, learning rate, hidden layer sizes, and dropout rate, were selected via hyperparameter optimization using Optuna \cite{akiba2019optunanextgenerationhyperparameteroptimization}. 
+
+% \lipsum[2-3] % Remove lipsum
+\end{itemize}
+% \section{Results and Discussion}
+% Our final model achieved an MRR of 0.874 in the public leaderboard. On the validation set, the model obtained:
+% MRR 0.942, Recall@1 0.906, Recall@3 0.973, NDCG 0.956
+% These results outperform the baseline provided by the challenge, which reports an MRR of approximately 0.462. 
+% This method effectively translates between text and image embedding spaces as the projection network maps text embeddings into the image space to make paired embeddings close. L\(^2\)-normalization stabilizes training and prevents scale differences from dominating the loss. The InfoNCE objective encourages alignment of positives and separation from a large set of negatives, with the memory queue providing diverse negative examples without large batches. However, InfoNCE embeddings are less precise than those from MSE or cosine similarity loss because they prioritize pushing positive pairs closer relative to negatives, rather than minimizing the absolute distance of a single positive pair.
+\section{Results and Discussion}
+Our final model achieved strong performance on the public leaderboard, recording a MRR of 0.874. On the validation set, the model yielded: $\text{MRR}=0.942$, $\text{Recall}@1=0.906$, $\text{Recall}@3=0.973$, and $\text{NDCG}=0.956$. These metrics substantially outperform the challenge baseline, which reported an $\text{MRR}$ of approximately $0.462$. This method effectively performs cross-modal translation by utilizing the projection network to map text embeddings into the target image space, ensuring proximity for paired samples. We employ $L2$-normalization for training stability, preventing scale differences from dominating the optimization. The InfoNCE objective promotes strong alignment of positive pairs and separation from a large set of negatives. This is achieved efficiently by the memory queue without the need for large mini-batches. However, InfoNCE embeddings inherently prioritize maximizing the margin between positive and negative logits, which can result in less precise absolute distance minimization compared to losses like MSE or direct cosine similarity.
+
+% \lipsum[4] % Remove lipsum
+
+\section{Conclusion}
+Our method, using an MLP trained with InfoNCE loss achieved an MRR of 0.874 on the public leaderboard. This contrastive approach learned the mapping between the two spaces, balancing retrieval performance against the inherent precision trade-offs of the InfoNCE objective.
+\href{https://github.com/the-summoning/aml-challenge.git}{LINK TO THE REPO}
+
+% \lipsum[5] % Remove lipsum
+
+% The sections above MUST fit into a single page, the rest is extra
+%=====================================================
+% --- SUPPLEMENTARY SECTION ---
+%=====================================================
+ % Start a new page for this section (if needed, or just \section* below)
+\newpage % Use \clearpage or \newpage to push this off the 1st page
+
+
+\section{What We Tried}
+\small
+% During the competition we found models that did not outperform our final MoCo-based method, instead they
+% provided valuable insights and contributed to our overall understanding of the problem.
+During the competition, we found and trained models that did not outperform our final MoCo-based method. Instead, they provided valuable insights and contributed to our overall understanding of the problem.
+
+% \subsection*{Method 1: Latent Space Translation}
+% Our first approach, based on the principle of zero-shot translation \cite{maiorca2024latentspacetranslationsemantic}, involved a simple linear mapping to align the text embeddings with the corresponding image embeddings. This baseline was used to directly translate between the two modalities in their latent spaces. However, the model performed poorly, suggesting the relationship between the text and image embedding spaces is highly non-linear and requires a more complex translation function.
+\subsection*{Method 1: Latent Space Translation}
+
+Our initial strategy, which was based on the zero-shot translation principle \cite{maiorca2024latentspacetranslationsemantic}, involved an affine mapping. We explored three variations of this simple approach: a basic \texttt{linear} mapping, a refinement using the \texttt{l-ortho} constraint, and the \texttt{ortho} solution derived from Procrustes analysis. All three methods underperformed, showing poor results. This performance shortfall led us to conclude that the relationship between the text and image embedding spaces is highly non-linear and fundamentally requires a more complex translation function.
+
+% \subsection*{Method 2: Inverse Pseudo-Transform}
+% Our second strategy leveraged the Inverse Pseudo-Transform (IPT) method \cite{maiorca2024latentspacetranslationinverse}, 
+% which first constructs a relative latent space using anchor points in order to project data into a common, lower-dimensional intermediate space. The core idea was to make the relative representations 
+% $\mathbf{X}_{\mathrm{rel}}$ and $\mathbf{Y}_{\mathrm{rel}}$ as similar as possible. Unfortunately the final alignment 
+% remained insufficient to reconstruct image embeddings accurately, resulting in overall poor retrieval performance.
+
+\subsection*{Method 2: Direct Mapping with Regression}
+
+We attempted a regression approach to predict image embeddings. We tested both a standard shallow architecture and a deep architecture with residual connections. Models were trained using MSE loss, Cosine Distance or a combination of both. Ultimately, this approach proved ineffective. The inability of even the residual network to converge on a good solution highlights the structural incompatibility of the two embedding spaces for direct mapping.
+
+\subsection*{Method 3: Inverse Pseudo-Transform}
+
+Our second strategy leveraged the Inverse Pseudo-Transform (IPT) method \cite{maiorca2024latentspacetranslationinverse}, which constructs two distinct relative spaces ($\mathbf{X}_{\mathrm{rel}}$ and $\mathbf{Y}_{\mathrm{rel}}$) using separate but parallel anchor points. We utilized the concepts of anchor pruning and completion, along with the suggested values for $\delta$ and $\omega$. The core IPT idea for cross-modal translation requires  $\mathbf{X}_{\mathrm{rel}} = \mathbf{Y}_{\mathrm{rel}}$ in order to apply the formula:
+$$
+\mathbf{Y}_{abs} = \mathbf{X}_{rel} \cdot (\mathbf{A}_{y}^T)^{-1}
+$$
+We successfully reconstructed the absolute spaces for both text and image modalities with near-perfect accuracy. However, the crucial assumption for translation, $\mathbf{X}_{\mathrm{rel}} = \mathbf{Y}_{\mathrm{rel}}$, failed to hold sufficiently for accurate reconstruction of $\mathbf{Y}_{\mathrm{abs}}$ using the text relative space $\mathbf{X}_{rel}$. To enforce the necessary alignment $\mathbf{X}_{\mathrm{rel}} \approx \mathbf{Y}_{\mathrm{rel}}$, we used different approaches: Least-Squares regression, Procrustes analysis, and a MLP but all three alignment methods underperformed, resulting in overall poor retrieval performance. This approach is similar to direct regression between the absolute spaces, but there's a key difference: the alignment is done on the much lower-dimensional relative spaces, whose dimensionality is determined by the number of anchors chosen. This potentially makes the direct translation easier and stops the problem from being considered a retrieval one like in the contrastive approach. 
+
+\subsection*{Method 4: Two-Head MLP with Memory Bank (Second best model)}
+We also experimented with a two-head architecture, in which the output embedding is derived by combining two components that are both trained within the same MLP:
+\begin{itemize}
+  \item \textbf{Direction Head} \textit{d}, which predicts a unit-norm vector representing the angular component of the embedding.
+  \item \textbf{Scale Head} \textit{s}, which predicts a scalar/vector (enforced to be positive via \textit{Softplus}) representing the magnitude of the embedding.
+\end{itemize}
+The final predicted image embedding was constructed by combining them as:
+\[
+T(x) = \mathrm{normalize}(d(x)) \cdot s(x).
+\]
+
+Both heads were trained using the same MoCo-style InfoNCE loss, then thanks to the support of a large negative queue of 32{,}000 samples, the model achieved competitive
+retrieval performance (MRR $\approx 0.871$) on the public leaderboard. However, it did not surpass the simpler main approach, likely because scale modulation introduces additional instability in contrastive optimization.
+
+\subsection*{Method 5: Flow Matching}
+
+We attempted to use a Flow Matching approach \cite{lipman2023flowmatchinggenerativemodeling}, modeling the transformation (Vector Field) from text to image embeddings. However, this sophisticated model architecture only achieved a maximum MRR of 0.76, indicating that the predicted image embeddings were still not accurate enough for effective cross-modal retrieval.
+
+
+%=====================================================
+% --- BIBLIOGRAPHY ---
+%=====================================================
+\section*{References}
+\small 
+% This will print all entries from your references.bib file
+% that were cited in the text (e.g., \cite{clip})
+\printbibliography[heading=none] 
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\end{document}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
